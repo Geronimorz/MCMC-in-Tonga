@@ -6,7 +6,7 @@ using Random, Distributions
 # include("MCsub.jl")
 function TD_inversion_function(
     TD_parameters::parameters, 
-    dataStruct1::MutabledataStruct, 
+    dataStruct1::DataStruct, 
     chain::Int64
     )
     # This line is needed to make sure that the chains are different from one another
@@ -31,17 +31,7 @@ function TD_inversion_function(
     yr = (TD_parameters.sig / 100) * (max(yVec...) - min(yVec...))
     zr = (TD_parameters.sig / 100) * (max(zVec...) - min(zVec...))
 
-    rayl = sqrt.((dataStruct.rayX[1:end - 1,:] - dataStruct.rayX[2:end,:]).^2 +
-    (dataStruct.rayY[1:end - 1,:] - dataStruct.rayY[2:end,:]).^2 +
-    (dataStruct.rayZ[1:end - 1,:] - dataStruct.rayZ[2:end,:]).^2)
-
-    U = dataStruct.U
-    rayu = 0.5 .* (U[1:end - 1,:] + U[2:end,:])
     
-    dataStruct.rayL = rayl
-    dataStruct.rayU = rayu
-
-    #====enforce discontinuity?====#
 
     ######################
     valid = 0 
@@ -60,9 +50,9 @@ function TD_inversion_function(
         # could overlap the last model with the newest model when saving them
         load_model = load(sort(model_checkpoint_lists)[end])
         # yurong 09/21/22: remove outdated jld file
-        for irm in 1:length(model_checkpoint_lists)-1
-            rm(sort(model_checkpoint_lists)[irm])
-        end
+       for irm in 1:length(model_checkpoint_lists)-2
+           rm(sort(model_checkpoint_lists)[irm])
+       end
         model = load_model["model"]
         dataStruct = load_model["dataStruct"]
         valid = 1
@@ -96,7 +86,6 @@ function TD_inversion_function(
                 append!(modeln.yCell, yNew)
                 append!(modeln.zCell, zNew)
                 append!(modeln.zeta, zetanew)
-                append!(modeln.layer, 1)
                 modeln.nCells += 1
 
                 if TD_parameters.prior == 1 # Uniform
@@ -131,7 +120,6 @@ function TD_inversion_function(
 
                 if rand(1)[1] < α && valid == 1
                     model = deepcopy(modeln)
-                    dataStruct = deepcopy(dataStructn)
                     model.accept = 1
                 end
             end
@@ -145,56 +133,45 @@ function TD_inversion_function(
                 deleteat!(modeln.yCell, kill)
                 deleteat!(modeln.zCell, kill)
                 deleteat!(modeln.zeta, kill)
-                deleteat!(modeln.layer, kill)
                 modeln.nCells -= 1
-                # ATTENTION! how to deal with id_n
-                # id_n       = model["id"]
-                # setindex!(modeln, id_n, "id")
-            
+
                 # make sure you haven't removed all the nodes from one layer
                 nlayer = 0
-                for i in model.layer
-                    if i == model.layer[kill]
-                        nlayer += 1
-                    end
-                end
-                if nlayer > 1
+
+                (modeln, dataStructn, valid) = evaluate(modeln, dataStruct, TD_parameters)
+                # F = return_interpolant(modeln, (modeln.layer == model.layer(kill)), TD_parameters.interp_style);
+
+                # ATTENTION! any(yVec) line304
+                # println([model["xCell"][kill]])
+                zetanew = Interpolation(TD_parameters, modeln, [model.xCell[kill]], [model.yCell[kill]], [model.zCell[kill]])[1]
+
+                # α(death), Byrnes and Bezada, 2020, eq. 17
+                
+                if TD_parameters.prior == 1 # Uniform
+                    α = ((model.nCells) / (model.nCells - 1)) * ((TD_parameters.zeta_scale) / (sig_zeta * sqrt(2 * pi))) * 
+                    exp(-((model.zeta[kill] - zetanew)^2) / (2 * sig_zeta^2) - (modeln.phi - model.phi) / 2)
+                    # α = ((model["nCells"][1]) / (model["nCells"][1] - 1)) * ((TD_parameters["sig_zeta"]) / (TD_parameters["zeta_scale"] * sqrt(2 * pi))) * 
+                    # exp(-((model["zeta"][kill] - zetanew)^2) / (2 * TD_parameters["sig_zeta"]^2) - (modeln["phi"][1] - model["phi"][1]) / 2)
+                    # push!(alpha2,α)
+                    α = min([1 α]...)           
+                elseif TD_parameters.prior == 2 # Normal
+                    # ATTENTION! check whether it exist
                     (modeln, dataStructn, valid) = evaluate(modeln, dataStruct, TD_parameters)
-                    # F = return_interpolant(modeln, (modeln.layer == model.layer(kill)), TD_parameters.interp_style);
-
-                    # ATTENTION! any(yVec) line304
-                    # println([model["xCell"][kill]])
-                    zetanew = Interpolation(TD_parameters, modeln, [model.xCell[kill]], [model.yCell[kill]], [model.zCell[kill]])[1]
-
-                    # α(death), Byrnes and Bezada, 2020, eq. 17
-                    
-                    if TD_parameters.prior == 1 # Uniform
-                        α = ((model.nCells) / (model.nCells - 1)) * ((TD_parameters.zeta_scale) / (sig_zeta * sqrt(2 * pi))) * 
-                        exp(-((model.zeta[kill] - zetanew)^2) / (2 * sig_zeta^2) - (modeln.phi - model.phi) / 2)
-                        # α = ((model["nCells"][1]) / (model["nCells"][1] - 1)) * ((TD_parameters["sig_zeta"]) / (TD_parameters["zeta_scale"] * sqrt(2 * pi))) * 
-                        # exp(-((model["zeta"][kill] - zetanew)^2) / (2 * TD_parameters["sig_zeta"]^2) - (modeln["phi"][1] - model["phi"][1]) / 2)
-                        # push!(alpha2,α)
-                        α = min([1 α]...)           
-                    elseif TD_parameters.prior == 2 # Normal
-                        # ATTENTION! check whether it exist
-                        (modeln, dataStructn, valid) = evaluate(modeln, dataStruct, TD_parameters)
-                        α = ((model.nCells) / (model.nCells - 1)) * (TD_parameters.zeta_scale / sig_zeta) * 
-                        exp((model.zeta[kill]^2) / (2 * TD_parameters.zeta_scale^2) - (model.zeta[kill] - zetanew)^2 / (2 * sig_zeta^2) - 
+                    α = ((model.nCells) / (model.nCells - 1)) * (TD_parameters.zeta_scale / sig_zeta) * 
+                    exp((model.zeta[kill]^2) / (2 * TD_parameters.zeta_scale^2) - (model.zeta[kill] - zetanew)^2 / (2 * sig_zeta^2) - 
+                    (modeln.phi - model.phi) / 2)
+                    α = min([1 α]...)
+                elseif TD_parameters.prior == 3 # Exponential
+                    if zetanew > 0
+                        α = ((model.nCells) / (model.nCells - 1)) * (TD_parameters.zeta_scale / (sqrt(2 * pi) * sig_zeta)) * 
+                        exp(model.zeta[kill] / TD_parameters.zeta_scale - (model.zeta[kill] - zetanew)^2 / (2 * sig_zeta^2) - 
                         (modeln.phi - model.phi) / 2)
-                        α = min([1 α]...)
-                    elseif TD_parameters.prior == 3 # Exponential
-                        if zetanew > 0
-                            α = ((model.nCells) / (model.nCells - 1)) * (TD_parameters.zeta_scale / (sqrt(2 * pi) * sig_zeta)) * 
-                            exp(model.zeta[kill] / TD_parameters.zeta_scale - (model.zeta[kill] - zetanew)^2 / (2 * sig_zeta^2) - 
-                            (modeln.phi - model.phi) / 2)
-                            α = min([1 α]...)  
-                        else
-                            valid = 0
-                        end
-                    end                    
-                else
-                    valid = 0
-                end
+                        α = min([1 α]...)  
+                    else
+                        valid = 0
+                    end
+                end                    
+
 
                 if rand(1)[1] < α && valid == 1
                     model = deepcopy(modeln)
@@ -237,7 +214,6 @@ function TD_inversion_function(
             if rand(1)[1] < α && valid == 1
                 # println(valid, ' ', action)
                 model = deepcopy(modeln)
-                dataStruct = deepcopy(dataStructn)
                 model.accept = 1
             end        
 
@@ -269,8 +245,7 @@ function TD_inversion_function(
                 end
 
                 if rand(1)[1] < α && valid == 1
-                    model = deepcopy(modeln)
-                    dataStruct = deepcopy(dataStructn)
+                    model = deepcopy(modeln) 
                     model.accept = 1
                 end
             end
@@ -291,7 +266,6 @@ function TD_inversion_function(
 
                 if log(rand(1)[1]) <= α && valid == 1
                     model = deepcopy(modeln)
-                    dataStruct = deepcopy(dataStructn)
                     model.allSig = sig_n
                     model.accept = 1
                 end

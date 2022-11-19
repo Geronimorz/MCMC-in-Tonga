@@ -75,7 +75,7 @@ end
 
 function build_starting(
     TD_parameters::parameters, 
-    dataStruct::MutabledataStruct
+    dataStruct::DataStruct
     )
 
     # log uniform distribution, in Byrnes and Bezada, 2020, eq. 11
@@ -108,14 +108,10 @@ function build_starting(
         zeta = -log.(rand(Int(nCells[1]))) .* TD_parameters.zeta_scale
     end
 
-    # ATTENTION! If discontinuity is not a field:
-    layer = ones(length(xCell))
-
     model = Model(nCells[1],
-        xVec, yVec, zVec,
         xCell, yCell, zCell,
-        zeta, zeta,
-        layer, -1, -1, -1, -1, -1, -1, -1, -1
+        zeta,
+        -1, zeros(1), zeros(1), -1, -1, -1, -1, -1
     )
     # setindex!(dataStruct, model["allSig"] .* ones(length(dataStruct["tS"])), "allSig")
     
@@ -125,14 +121,13 @@ function build_starting(
 end
 
 function evaluate(
-    model_original::Model, 
-    dataStruct::MutabledataStruct, 
+    model::Model, 
+    dataStruct::DataStruct, 
     TD_parameters::parameters
     )
-    valid            = 1
-    likelihood = 1
-    phi = 1
-    model = deepcopy(model_original)
+    valid       = 1
+    likelihood  = 1
+    phi         = 1
     model.phi = phi
     model.likelihood = likelihood
 
@@ -141,8 +136,9 @@ function evaluate(
     end
 
     (m, n) = size(dataStruct.rayX)
-
-    ptS = zeros(n, 1)
+    ptS = zeros(n)
+    observed_traveltime = zeros(n,1)
+    predicted_traveltime = zeros(n,1)
     for i in 1:n
         zeta0 = Interpolation(TD_parameters, model, dataStruct.rayX[:,i], dataStruct.rayY[:,i], dataStruct.rayZ[:,i]) 
         rayzeta = []
@@ -152,29 +148,33 @@ function evaluate(
     
         rayl = dataStruct.rayL[:,i]
         index = findall(x -> isnan(x), rayl)
+        
         if isempty(index)
             ptS[i] = sum(rayl .* dataStruct.rayU[:,i] .* (rayzeta ./ 1000))
+            predicted_traveltime[i] = sum(rayl .* dataStruct.rayU[:,i])
         else
-            rayl = dataStruct.rayL[1:index[1] - 1,i]  
-            rayu = dataStruct.rayU[1:index[1] - 1,i]
+            rayl = dataStruct.rayL[1:index[1]-1,i]  
+            rayu = dataStruct.rayU[1:index[1]-1,i]
+        # compare travel time
             ptS[i] = sum(rayl .* rayu .* (rayzeta ./ 1000))
+            predicted_traveltime[i] = sum(rayl .* rayu)
         end
+        observed_traveltime[i] = 1000*dataStruct.tS[i]/dataStruct.allaveatten[i]
     end
 
     (m, n) = size(dataStruct.rayZ)
 
     tS = dataStruct.tS
 
-
     C = 0
-
     for k in 1:length(dataStruct.allSig)
         C += (ptS - tS)[k].^2 .* 1.0 / dataStruct.allSig[k][1]^2
-        # println(dataStruct["allSig"][k][1])
     end
     model.phi = C
     model.ptS = ptS
     model.tS = tS
+    # model.predicted_traveltime = predicted_traveltime
+    # model.observed_traveltime = observed_traveltime
 
     likelihood = sum(-log.(dataStruct.allSig * sqrt(2 * pi)) * length(tS)) 
     - sum(0.5 * ((vec(ptS) .- vec(tS)) ./ vec(dataStruct.allSig)).^2)
@@ -227,6 +227,41 @@ function IDW(
     return zeta
 end
 
+function v_idw(x, y, z, mx, my, mz, mv)
+
+    v_sum   = zero(Float64)
+    inv_sum = zero(Float64)
+
+    @inbounds for i in 1:length(mx)
+
+        distance = (mx[i] - x)^2 + (my[i] - y)^2 + (mz[i] - z)^2
+        v_sum   += mv[i] / distance
+        inv_sum += 1 / distance
+
+    end
+
+    return v_sum / inv_sum
+
+end
+
+function v_nearest(x, y, z, mx, my, mz, mv)
+
+    v     = zero(Float64)
+    mdist = 1e9
+
+    @inbounds for i in 1:length(mx)
+
+        distance = (mx[i] - x)^2 + (my[i] - y)^2 + (mz[i] - z)^2
+        if distance < mdist
+            mdist = distance
+            v     = mv[i]
+        end
+
+    end
+    return v
+
+end
+
 function NearestInterpolation(
     TD_parameters::parameters, 
     xCell::Array{Float64,2}, 
@@ -273,12 +308,6 @@ function Interpolation(
     model::Model, 
     X, Y, Z
     )
-    
-    xCell        = [ model.xCell;zeros(200 - Int(model.nCells), 1) ]
-    yCell        = [ model.yCell;zeros(200 - Int(model.nCells), 1) ]
-    zCell        = [ model.zCell;zeros(200 - Int(model.nCells), 1) ]
-    # ATTENTION! IDK why doing this
-    zeta    = [ model.zeta; zeros(200 - Int(model.nCells), 1) ]
 
     if .~isempty(findall(x -> isnan.(x), X))
         npoints = findall(x -> isnan.(x), X)[1] - 1
@@ -295,10 +324,7 @@ function Interpolation(
     #     X = X .* ones(npoints)
     # end
     if TD_parameters.interp_style == 1  # Nearest Interpolation
-        X[isnan.(X)] .= 99999
-        Y[isnan.(Y)] .= 99999
-        Z[isnan.(Z)] .= 99999
-        zeta = NearestInterpolation(TD_parameters, xCell, yCell, zCell, zeta, X, Y, Z, Int(model.nCells), npoints)
+        zeta = [ v_nearest(X[k], Y[k], Z[k], model.xCell, model.yCell, model.zCell, model.zeta) for k = 1:npoints ]
     elseif TD_parameters.interp_style == 2  # Inverse Distance Weighting(IDW) 
         # X[isnan.(X)] .= 99999
         # Y[isnan.(Y)] .= 99999
@@ -311,7 +337,7 @@ end
 
 function CrossSectionInterpolation(
     models::Array{Any,1}, # models in an individual chain
-    dataStruct::MutabledataStruct, 
+    dataStruct::DataStruct, 
     TD_parameters::parameters,
     chain::Int64
     )
@@ -350,10 +376,11 @@ function CrossSectionInterpolation(
 end
 
 function Plot_model(
-    dataStruct::MutabledataStruct, 
-    model_mean::Array{Float64}, 
+    dataStruct::DataStruct, 
+    model_mean::Array{Float64,2},  #used to be Array{Float64} since model_mean is a 1 dimensional vector, but it is now a 2D matrix
     TD_parameters::parameters,
     cmax::Float64,
+    l0::Int64,
     Type::String,
     crosssectionType::String
     )
@@ -361,12 +388,15 @@ function Plot_model(
     ENV["GKSwstype"] = "nul"
     gr()
     closeenough = 2.0
-    if Type == "Mask" 
+    if Type == "Masked" 
         cmap = :jet
+        cbtitle = "1000/Qp"
     elseif Type == "Uncertainty"
         cmap = :bone
+        cbtitle = "σ"
     elseif Type == "Mean"
         cmap = :jet
+        cbtitle = "1000/Qp"
     end
 
     dirname = "./figures/"*crosssectionType*Type
@@ -399,10 +429,9 @@ function Plot_model(
     else # 3d
         if crosssectionType == "xz"
             (m, n) = size(dataStruct.rayY)
-            y0 = TD_parameters.ySlice
             nearrays = zeros(n)
             for i in 1:n
-                yvec = dataStruct.rayY[:,i] .- y0    
+                yvec = dataStruct.rayY[:,i] .- l0    
                 if sum(abs.(yvec)) - abs(sum(yvec)) > 1e-7
                     nearrays[i] = 1
                 end  
@@ -417,25 +446,29 @@ function Plot_model(
             nearraysX = tmpx[:,nearrays]
             nearraysY = tmpy[:,nearrays]
 
-            p = contourf(vec(dataStruct.xVec), vec(dataStruct.zVec), vec(model_mean), linewidth=0.001, xlabel="distance(km)", ylabel="depth(km)", yflip=true, clims=(0,cmax), c=cmap)
+            p = contourf(vec(dataStruct.xVec), vec(dataStruct.zVec), vec(model_mean), linewidth=0.001, xlabel="distance(km)", ylabel="depth(km)", yflip=true, clims=(0,cmax), c=cmap, colorbar_title = cbtitle)
            
-            title!("Model_"*Type*"_xzMap" * string(TD_parameters.ySlice) * "km")
-            savefig(p, dirname*"/Model_"*Type*"_xzMap" * string(TD_parameters.ySlice) * "km")
+            if Type == "Uncertainty"
+                title!("Model uncertainty on cross-section")
+            else
+                title!(Type*" model on cross-section")
+            end
+            savefig(p, "./Model_"*Type*"_xzMap" * string(l0) * "km")
 
-            title!("Model_"*Type*"_xzMap_0-300km" * string(TD_parameters.ySlice) * "km")
+            title!(Type*" model on cross-section")
             # ylims!(p, (0, 300))
             # savefig(p, "model_mean_xzMap_0-300km" * string(TD_parameters["ySlice"][1]) * "km") 
 
             ylims!(p, (0, 660))
             scatter!(p, dataStruct.elonsX, vec(dataStruct.edep), marker=:o, color=:lightblue, label="events", markersize=4,legend=false)
-            savefig(p, dirname*"/Model_"*Type*"_xzMap_events" * string(TD_parameters.ySlice) * "km") 
+            savefig(p, "./Model_"*Type*"_xzMap_events" * string(l0) * "km") 
 
             plot!(p, tmpx, tmpy, color=:white, legend=false)
             plot!(p, nearraysX, nearraysY, color=:forestgreen)
             scatter!(p, dataStruct.dataX, zeros(size(dataStruct.dataX)), marker=:utri, color=:pink, label="station", markersize=6)
             
-            title!("Model_"*Type*"_xzMap_ray" * string(TD_parameters.ySlice) * "km")       
-            savefig(p, dirname*"/Model_"*Type*"_xzMap_ray" * string(TD_parameters.ySlice) * "km")   
+            title!("Model_"*Type*"_xzMap_ray" * string(l0) * "km")       
+            savefig(p, "./Model_"*Type*"_xzMap_ray" * string(l0) * "km")   
   
             # title!("model_mean_xzMap_0-300km_ray" * string(TD_parameters["ySlice"][1]) * "km")
             # ylims!(p, (0, 300))
@@ -444,10 +477,9 @@ function Plot_model(
 
         if crosssectionType == "xy"
             (m, n) = size(dataStruct.rayZ)
-            z0 = TD_parameters.zSlice
             nearrays = zeros(n)
             for i in 1:n
-                zvec = dataStruct.rayZ[:,i] .- z0    
+                zvec = dataStruct.rayZ[:,i] .- l0    
                 if sum(abs.(zvec)) - abs(sum(zvec)) > 1e-7
                     nearrays[i] = 1
                 end  
@@ -462,17 +494,22 @@ function Plot_model(
             nearraysX = tmpx[:,nearrays]
             nearraysY = tmpy[:,nearrays]
         
-            p = contourf(dataStruct.xVec, dataStruct.yVec, vec(model_mean), xlabel="X(km)", ylabel="Y(km)", clims=(0,30), c=cmap)
-            title!("Model_"*Type*"_xyMap" * string(TD_parameters.zSlice) * "km")        
-            savefig(p, dirname*"/Model_"*Type*"_xyMap" * string(TD_parameters.zSlice) * "km")
+            p = contourf(dataStruct.xVec, dataStruct.yVec, vec(model_mean), xlabel="X(km)", ylabel="Y(km)",linewidth=0.001, clims=(0,cmax), c=cmap, colorbar_title = cbtitle)
+            title!("Model_"*Type*"_xyMap" * string(l0) * "km")  
+            if Type == "Uncertainty"
+                title!("Model uncertainty in map view (" * string(l0) * " km)")
+            else
+                title!(Type*" model in map view (" * string(l0) * " km)")
+            end      
+            savefig(p, "./Model_"*Type*"_xyMap" * string(l0) * "km")
 
             plot!(p, tmpx, tmpy, color=:white, legend=false)
             plot!(p, nearraysX, nearraysY, color=:forestgreen)
             scatter!(p, dataStruct.dataX, dataStruct.dataY, shape=:utri, color=:pink, label="station", markersize=6)
             scatter!(p, dataStruct.elonsX, dataStruct.elatsY, shape=:o, color=:lightblue, label="events", markersize=4)
-            title!("Model_"*Type*"_xyMap_ray" * string(TD_parameters.zSlice) * "km")
+            title!("Model_"*Type*"_xyMap_ray" * string(l0) * "km")
         
-            savefig(p, dirname*"/Model_"*Type*"_xyMap_ray" * string(TD_parameters.zSlice) * "km")       
+            savefig(p, "./Model_"*Type*"_xyMap_ray" * string(l0) * "km")       
         end
 
     end
@@ -482,7 +519,7 @@ end
 
 function PlotModelsOverIterations(
     models, # models in an individual chain
-    dataStruct::MutabledataStruct, 
+    dataStruct::DataStruct, 
     TD_parameters::parameters,
     chain::Int64,
     cmax::Float64
@@ -584,7 +621,7 @@ function PlotModelsOverIterations(
 end
 
 function Plot_Contours(
-    dataStruct::MutabledataStruct, 
+    dataStruct::DataStruct, 
     plot_model, # ::Array{Float64,2}, 
     TD_parameters::parameters,
     chain::Int64,
@@ -711,4 +748,78 @@ function Plot_Contours(
         end
 
     end
+end
+
+function plot_model_hist(model_hist, dataStruct, TD_parmaters, cmax)
+
+    if TD_parameters.xzMap == true
+        for l0 in TD_parameters.ySlice
+            m_xz = []
+            m = zeros(length(vec(dataStruct.xVec)), length(vec(dataStruct.zVec)))
+
+            mcount = 0
+
+            for i = 1:length(model_hist)
+
+                for j = 1:length(model_hist[i])
+
+                    m  = [ v_nearest(xs, l0, zs,
+                        model_hist[i][j].xCell, model_hist[i][j].yCell, model_hist[i][j].zCell, model_hist[i][j].zeta)
+                        for xs in vec(dataStruct.xVec), zs in vec(dataStruct.zVec) ]
+                    append!(m_xz,[m])
+
+                end
+            end
+
+            model_mean_xz   = mean(m_xz)
+            poststd_xz      = std(m_xz)
+            mask_xz         = ones(size(poststd_xz))
+            for i = 1:length(poststd_xz)
+                if poststd_xz[i] > 5
+                    mask_xz[i] = NaN
+                end
+            end
+            mask_model_xz = mask_xz .* model_mean_xz
+
+            @time Plot_model(dataStruct, model_mean_xz, TD_parameters, cmax, l0, "Mean", "xz")
+            @time Plot_model(dataStruct, poststd_xz, TD_parameters, maximum(poststd_xz), l0, "Uncertainty", "xz")
+            @time Plot_model(dataStruct, mask_model_xz, TD_parameters, cmax, l0, "Masked", "xz")
+        end
+    end
+
+    if TD_parameters.xyMap == true
+        for l0 in TD_parameters.zSlice
+            m_xy = []
+            m = zeros(length(vec(dataStruct.xVec)), length(vec(dataStruct.yVec)))
+            mcount = 0
+
+            for i = 1:length(model_hist)
+
+                for j = 1:length(model_hist[i])
+
+                    m  = [ v_nearest(xs, ys, l0,
+                        model_hist[i][j].xCell, model_hist[i][j].yCell, model_hist[i][j].zCell, model_hist[i][j].zeta)
+                        for xs in vec(dataStruct.xVec), ys in vec(dataStruct.yVec) ]
+                    append!(m_xy,[m])
+
+                end
+            end
+
+            model_mean_xy   = mean(m_xy)
+            poststd_xy      = std(m_xy)
+            mask_xy         = ones(size(poststd_xy))
+            for i = 1:length(poststd_xy)
+                if poststd_xy[i] > 5
+                    mask_xy[i] = NaN
+                end
+            end
+            mask_model_xy = mask_xy .* model_mean_xy
+
+            @time Plot_model(dataStruct, model_mean_xy, TD_parameters, cmax, l0, "Mean", "xy")
+            @time Plot_model(dataStruct, poststd_xy, TD_parameters, maximum(poststd_xy), l0, "Uncertainty", "xy")
+            @time Plot_model(dataStruct, mask_model_xy, TD_parameters, cmax, l0, "Masked", "xy")
+        end
+    end
+
+
 end

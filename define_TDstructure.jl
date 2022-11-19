@@ -25,8 +25,8 @@ struct parameters
     print_each      ::Float64
 
 #=====map parameters=====#
-    max_depth       ::Int64
-    min_depth       ::Int64
+    max_depth       ::Float64
+    min_depth       ::Float64
 #check whether it's used
     rotation        ::Int64
 ###
@@ -36,9 +36,9 @@ struct parameters
 
 #====Cross section parameters====#
     xyMap           ::Bool      # work on x-y cross section with a given z value
-    zSlice          ::Int64     # the given z value (vertical axis)
+    zSlice          ::Array{Int64,1}     # the given z value (vertical axis)
     xzMap           ::Bool      # work on x-z cross section with a given y value
-    ySlice          ::Int64     # the given y value (horizontal axis, E-W afer rotation of β)
+    ySlice          ::Array{Int64,1}     # the given y value (horizontal axis, E-W afer rotation of β)
     # yzMap           ::Bool      # work on y-z cross section with a given x value, currently not useful as it is along-strike cross section
     # xSlice          ::Int64     # the given x value (horizontal axis, N-S afer rotation of β)
 end
@@ -47,15 +47,17 @@ function define_TDstructrure()
 
     TD_parameters = parameters(
         #====basic parameters====#
-            0, 1, 1,
+            0, 0, 1,
         #====Voronoi diagram parameters====#
             10, 50, 100, 5, 0.1, 1, 0, 1, 1, 1,
         #====Monte Carlo parameters====#
             2, 1e3, 5e2, 1e1, 1e2,
+            # 2, 5e6, 2.5e5, 2.5e4, 2.5e5,
+            # 8, 1e5, 5e4, 1e3, 1e4,
         #====map parameters====#
             660, 0, 20, 20, 100, 20,
         #====Cross section parameters====#
-            true, 100, true, 150
+            true, [50,300,500], true, [700,800]
         )
     
     return TD_parameters
